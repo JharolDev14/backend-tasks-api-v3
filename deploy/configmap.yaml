@@ -1,0 +1,11 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: backend-tasks-api-v3-config
+  namespace: default
+  labels:
+    app: backend-tasks-api-v3
+data:
+  LOG_LEVEL: "info"
+  NODE_ENV: "production"
+  ALLOWED_ORIGIN: "*"
