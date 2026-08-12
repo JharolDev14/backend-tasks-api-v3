@@ -1,5 +1,4 @@
 name: Build and Deploy ACR
-
 on:
   push:
     branches:
@@ -27,35 +26,39 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-
-
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Azure Login
-        uses: azure/login@v3
-        with:
-          client-id: ${{ secrets.AZURE_CLIENT_ID }}
-          client-secret: ${{ secrets.AZURE_CLIENT_SECRET }}
-          tenant-id: ${{ env.AZURE_TENANT_ID }}
-          subscription-id: ${{ env.AZURE_SUBSCRIPTION_ID }}
-          auth-type: SERVICE_PRINCIPAL
-
-
-      - name: Validate Azure Login
+      - name: Azure CLI Login
         shell: bash
+        env:
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
         run: |
+          echo "===== AZURE LOGIN ====="
+
+          az login \
+            --service-principal \
+            --username "$AZURE_CLIENT_ID" \
+            --password "$AZURE_CLIENT_SECRET" \
+            --tenant "$AZURE_TENANT_ID"
+
+          az account set \
+            --subscription "$AZURE_SUBSCRIPTION_ID"
+
           echo "===== AZURE ACCOUNT ====="
 
           az account show \
             --query "{subscription:id,tenantId:tenantId,user:user.name}" \
             --output table
 
-
       - name: Azure Container Registry Login
         shell: bash
+        env:
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
         run: |
           echo "===== AZURE CONTAINER REGISTRY ====="
 
@@ -66,11 +69,10 @@ jobs:
 
           echo "===== DOCKER LOGIN ====="
 
-          echo "${{ secrets.AZURE_CLIENT_SECRET }}" | \
+          echo "$AZURE_CLIENT_SECRET" | \
             docker login "$REGISTRY" \
-              --username "${{ secrets.AZURE_CLIENT_ID }}" \
+              --username "$AZURE_CLIENT_ID" \
               --password-stdin
-
 
       - name: Calculate Image Version
         shell: bash
@@ -122,7 +124,6 @@ jobs:
           echo "Docker image created:"
           echo "$FULL_IMAGE"
 
-
       - name: Push Docker Image
         shell: bash
         run: |
@@ -132,7 +133,6 @@ jobs:
 
           echo "Image successfully pushed:"
           echo "$FULL_IMAGE"
-
 
       - name: Verify Image in ACR
         shell: bash
@@ -145,7 +145,6 @@ jobs:
           echo "Expected tag:"
           echo "$IMAGE_TAG"
 
-          echo "Available tags:"
           az acr repository show-tags \
             --name "$ACR_NAME" \
             --repository "$IMAGE_NAME" \
@@ -200,6 +199,9 @@ jobs:
 
           cat kustomization.yaml
 
+      # =========================================================
+      # VALIDATE KUSTOMIZATION
+      # =========================================================
       - name: Validate Kustomize
         if: github.ref == 'refs/heads/main'
         shell: bash
@@ -212,7 +214,9 @@ jobs:
 
           echo "===== KUSTOMIZE VALIDATION SUCCESS ====="
 
-
+      # =========================================================
+      # COMMIT KUSTOMIZE UPDATE
+      # =========================================================
       - name: Commit Kustomize Update
         if: github.ref == 'refs/heads/main'
         shell: bash
