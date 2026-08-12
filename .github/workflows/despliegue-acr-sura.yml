@@ -1,111 +1,68 @@
-name: Build and Push to ACR
+name: Build and Deploy ACR
 
 on:
   push:
     branches:
       - main
       - develop
-concurrency:
-  group: acr-version-${{ github.workflow }}
-  cancel-in-progress: false
+    paths-ignore:
+      - 'deploy/**'
+
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
 env:
   ACR_NAME: crsuradev
   REGISTRY: crsuradev.azurecr.io
   IMAGE_NAME: backend-tasks-api-v3
   VERSION_PREFIX: sura.v
-  AZURE_TENANT_ID: 9dbc76ea-fb25-4b07-8f07-5dc315999b76
-  AZURE_SUBSCRIPTION_ID: f0550323-fb0b-44d4-8a39-ecf0f6c2dbc9
+
 jobs:
   build-and-push:
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-    steps:
-      - name: Checkout Repository
-        uses: actions/checkout@v4
-      - name: Azure Login
-        run: |
-          echo "===== AZURE LOGIN ====="
 
-          az login --service-principal \
-            --username "${{ secrets.AZURE_CLIENT_ID }}" \
-            --password "${{ secrets.AZURE_CLIENT_SECRET }}" \
-            --tenant "$AZURE_TENANT_ID"
-      - name: List Available Subscriptions
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Azure Login
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Azure Container Registry Login
         run: |
-          echo "===== AVAILABLE SUBSCRIPTIONS ====="
-          az account list -o table
-      - name: Select Subscription
-        run: |
-          echo "===== SELECTING SUBSCRIPTION ====="
-          az account set \
-            --subscription "$AZURE_SUBSCRIPTION_ID"
-      - name: Validate Current Subscription
-        run: |
-          echo "===== CURRENT SUBSCRIPTION ====="
-          az account show -o table
-      - name: List ACRs in Selected Subscription
-        run: |
-          echo "===== ACRs IN CURRENT SUBSCRIPTION ====="
-          az acr list -o table
-      - name: Validate Azure Container Registry
-        run: |
-          echo "===== VALIDATING ACR ====="
+          echo "===== Azure Container Registry ====="
+
           az acr show \
             --name "$ACR_NAME" \
-            -o table
-      - name: Login to Azure Container Registry
-        run: |
-          echo "===== LOGIN TO ACR ====="
+            --output table
 
           az acr login \
             --name "$ACR_NAME"
-      - name: List Repositories
-        run: |
-          echo "===== ACR REPOSITORIES ====="
 
-          az acr repository list \
-            --name "$ACR_NAME" \
-            -o table
-      - name: Calculate Progressive Version
+
+      - name: Calculate Image Version
+        id: version
         shell: bash
         run: |
-          echo "===== CALCULATING PROGRESSIVE VERSION ====="
-          echo "Repository:"
-          echo "$IMAGE_NAME"
-          echo "Version prefix:"
-          echo "$VERSION_PREFIX"
-          echo ""
-          echo "Existing tags:"
-          az acr repository show-tags \
-            --name "$ACR_NAME" \
-            --repository "$IMAGE_NAME" \
-            --output tsv || true
-          # ------------------------------------------------------
-          # Obtain the highest existing version.
-          #
-          # Expected:
-          #
-          # sura.v1
-          # sura.v2
-          # sura.v3
-          #
-          # Result:
-          #
-          # 3
-          # ------------------------------------------------------
+          echo "===== CALCULATING IMAGE VERSION ====="
+
           LAST_VERSION=$(
             az acr repository show-tags \
               --name "$ACR_NAME" \
               --repository "$IMAGE_NAME" \
-              --output tsv 2>/dev/null |
+              --output tsv |
               grep -E "^${VERSION_PREFIX}[0-9]+$" |
               sed "s/^${VERSION_PREFIX}//" |
               sort -n |
               tail -1
           )
 
-          # If no previous version exists, start from 0.
           if [ -z "$LAST_VERSION" ]; then
             LAST_VERSION=0
           fi
@@ -113,193 +70,85 @@ jobs:
           NEXT_VERSION=$((LAST_VERSION + 1))
 
           IMAGE_TAG="${VERSION_PREFIX}${NEXT_VERSION}"
-          FULL_IMAGE="$REGISTRY/$IMAGE_NAME:$IMAGE_TAG"
+          FULL_IMAGE="${REGISTRY}/${IMAGE_NAME}:${IMAGE_TAG}"
 
-          echo ""
-          echo "Previous version:"
-          echo "$LAST_VERSION"
-          echo "New version:"
-          echo "$NEXT_VERSION"
-          echo "New tag:"
-          echo "$IMAGE_TAG"
-          echo "Full image:"
-          echo "$FULL_IMAGE"
-          # Export variables for subsequent steps.
-          echo "LAST_VERSION=$LAST_VERSION" >> "$GITHUB_ENV"
-          echo "NEXT_VERSION=$NEXT_VERSION" >> "$GITHUB_ENV"
-          echo "IMAGE_TAG=$IMAGE_TAG" >> "$GITHUB_ENV"
-          echo "FULL_IMAGE=$FULL_IMAGE" >> "$GITHUB_ENV"
-      - name: Validate Previous Image
-        shell: bash
-        run: |
-          echo "===== PREVIOUS IMAGE VALIDATION ====="
-          if [ "$LAST_VERSION" -gt 0 ]; then
-            PREVIOUS_TAG="${VERSION_PREFIX}${LAST_VERSION}"
-            PREVIOUS_IMAGE="$REGISTRY/$IMAGE_NAME:$PREVIOUS_TAG"
-            echo "Previous tag:"
-            echo "$PREVIOUS_TAG"
-            echo "Previous image:"
-            echo "$PREVIOUS_IMAGE"
-            PREVIOUS_DIGEST=$(
-              az acr manifest list-metadata \
-                --registry "$ACR_NAME" \
-                --name "$IMAGE_NAME" \
-                --query "[?tags && contains(tags, '$PREVIOUS_TAG')].digest | [0]" \
-                -o tsv 2>/dev/null || true
-            )
-            PREVIOUS_UPDATED_TIME=$(
-              az acr manifest list-metadata \
-                --registry "$ACR_NAME" \
-                --name "$IMAGE_NAME" \
-                --query "[?tags && contains(tags, '$PREVIOUS_TAG')].lastUpdateTime | [0]" \
-                -o tsv 2>/dev/null || true
-            )
-            echo "Previous digest:"
-            echo "${PREVIOUS_DIGEST:-N/A}"
-            echo "Previous updated time:"
-            echo "${PREVIOUS_UPDATED_TIME:-N/A}"
-            echo "PREVIOUS_IMAGE_STATUS=FOUND" >> "$GITHUB_ENV"
-            echo "PREVIOUS_IMAGE=$PREVIOUS_IMAGE" >> "$GITHUB_ENV"
-            echo "PREVIOUS_TAG=$PREVIOUS_TAG" >> "$GITHUB_ENV"
-            echo "PREVIOUS_DIGEST=${PREVIOUS_DIGEST:-N/A}" >> "$GITHUB_ENV"
-            echo "PREVIOUS_UPDATED_TIME=${PREVIOUS_UPDATED_TIME:-N/A}" >> "$GITHUB_ENV"
-          else
-            echo "No previous image found."
-            echo "PREVIOUS_IMAGE_STATUS=NOT_FOUND" >> "$GITHUB_ENV"
-            echo "PREVIOUS_IMAGE=N/A" >> "$GITHUB_ENV"
-            echo "PREVIOUS_TAG=N/A" >> "$GITHUB_ENV"
-            echo "PREVIOUS_DIGEST=N/A" >> "$GITHUB_ENV"
-            echo "PREVIOUS_UPDATED_TIME=N/A" >> "$GITHUB_ENV"
-          fi
+          echo "Last version : ${LAST_VERSION}"
+          echo "Next version : ${NEXT_VERSION}"
+          echo "Image tag    : ${IMAGE_TAG}"
+          echo "Full image   : ${FULL_IMAGE}"
+
+          echo "IMAGE_TAG=${IMAGE_TAG}" >> "$GITHUB_ENV"
+          echo "FULL_IMAGE=${FULL_IMAGE}" >> "$GITHUB_ENV"
+
+
       - name: Build Docker Image
-        shell: bash
         run: |
           echo "===== BUILDING IMAGE ====="
-          echo "Image:"
-          echo "$FULL_IMAGE"
-          echo "Version:"
-          echo "$IMAGE_TAG"
-          echo "Push creator:"
-          echo "$GITHUB_ACTOR"
-          echo "Triggering actor:"
-          echo "$GITHUB_TRIGGERING_ACTOR"
-          echo "Branch:"
-          echo "$GITHUB_REF_NAME"
-          echo "Commit SHA:"
-          echo "$GITHUB_SHA"
+
           docker build \
-            --label org.opencontainers.image.authors="$GITHUB_ACTOR" \
-            --label org.opencontainers.image.revision="$GITHUB_SHA" \
-            --label org.opencontainers.image.source="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" \
-            --label org.opencontainers.image.created="$(date -u +'%Y-%m-%dT%H:%M:%SZ')" \
-            --label org.opencontainers.image.version="$IMAGE_TAG" \
-            --label com.github.actor="$GITHUB_ACTOR" \
-            --label com.github.triggering_actor="$GITHUB_TRIGGERING_ACTOR" \
-            --label com.github.ref="$GITHUB_REF_NAME" \
-            -t "$FULL_IMAGE" .
+            -t "$FULL_IMAGE" \
+            .
+
       - name: Push Docker Image
-        shell: bash
         run: |
           echo "===== PUSHING IMAGE ====="
-          echo "Pushing:"
-          echo "$FULL_IMAGE"
+
           docker push "$FULL_IMAGE"
-      - name: Validate New Image
+
+      - name: Verify Image in ACR
+        run: |
+          echo "===== VERIFYING IMAGE ====="
+
+          az acr repository show \
+            --name "$ACR_NAME" \
+            --repository "$IMAGE_NAME" \
+            --output table
+
+          echo "Checking tag: $IMAGE_TAG"
+
+          az acr repository show-tags \
+            --name "$ACR_NAME" \
+            --repository "$IMAGE_NAME" \
+            --output tsv |
+            grep -Fx "$IMAGE_TAG"
+
+
+      - name: Setup Kustomize
+        if: github.ref == 'refs/heads/main'
+        uses: imranismail/setup-kustomize@v2
+
+      - name: Update Kustomize Image Tag
+        if: github.ref == 'refs/heads/main'
         shell: bash
         run: |
-          echo "===== NEW IMAGE VALIDATION ====="
-          NEW_DIGEST=$(
-            az acr manifest list-metadata \
-              --registry "$ACR_NAME" \
-              --name "$IMAGE_NAME" \
-              --query "[?tags && contains(tags, '$IMAGE_TAG')].digest | [0]" \
-              -o tsv
-          )
+          echo "===== UPDATING KUSTOMIZE ====="
 
-          NEW_UPDATED_TIME=$(
-            az acr manifest list-metadata \
-              --registry "$ACR_NAME" \
-              --name "$IMAGE_NAME" \
-              --query "[?tags && contains(tags, '$IMAGE_TAG')].lastUpdateTime | [0]" \
-              -o tsv
-          )
+          cd deploy
 
-          echo "New image:"
-          echo "$FULL_IMAGE"
-          echo "New digest:"
-          echo "$NEW_DIGEST"
-          echo "New updated time:"
-          echo "$NEW_UPDATED_TIME"
-          echo "NEW_IMAGE=$FULL_IMAGE" >> "$GITHUB_ENV"
-          echo "NEW_DIGEST=$NEW_DIGEST" >> "$GITHUB_ENV"
-          echo "NEW_UPDATED_TIME=$NEW_UPDATED_TIME" >> "$GITHUB_ENV"
-      - name: Summary
+          kustomize edit set image \
+            app-image="${REGISTRY}/${IMAGE_NAME}:${IMAGE_TAG}"
+
+          echo
+          echo "===== UPDATED KUSTOMIZATION ====="
+          cat kustomization.yaml
+
+      - name: Commit Kustomize Update
+        if: github.ref == 'refs/heads/main'
         shell: bash
         run: |
-          echo "========================================="
-          echo "Docker Image Publish Summary"
-          echo "========================================="
-          echo "Repository:"
-          echo "$IMAGE_NAME"
-          echo "========================================="
-          echo "Previous version:"
-          echo "$LAST_VERSION"
-          echo "Previous image:"
-          echo "$PREVIOUS_IMAGE"
-          echo "Previous digest:"
-          echo "$PREVIOUS_DIGEST"
-          echo "========================================="
-          echo "New version:"
-          echo "$NEXT_VERSION"
-          echo "New image:"
-          echo "$NEW_IMAGE"
-          echo "New digest:"
-          echo "$NEW_DIGEST"
-          echo "New updated time:"
-          echo "$NEW_UPDATED_TIME"
-          echo "========================================="
-          echo "Push creator:"
-          echo "$GITHUB_ACTOR"
-          echo "Triggering actor:"
-          echo "$GITHUB_TRIGGERING_ACTOR"
-          echo "Commit SHA:"
-          echo "$GITHUB_SHA"
-          echo "Branch:"
-          echo "$GITHUB_REF_NAME"
-          echo "========================================="
+          echo "===== COMMITTING KUSTOMIZE UPDATE ====="
 
-          {
-            echo "## Docker Image Publish Summary"
-            echo ""
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-            echo "### Version"
-            echo ""
-            echo "- Previous version: \`$LAST_VERSION\`"
-            echo "- New version: \`$NEXT_VERSION\`"
-            echo "- Tag: \`$IMAGE_TAG\`"
-            echo ""
+          git add deploy/kustomization.yaml
 
-            echo "### Previous image"
-            echo ""
-            echo "- Status: \`$PREVIOUS_IMAGE_STATUS\`"
-            echo "- Image: \`$PREVIOUS_IMAGE\`"
-            echo "- Digest: \`$PREVIOUS_DIGEST\`"
-            echo "- Updated time: \`$PREVIOUS_UPDATED_TIME\`"
-            echo ""
+          if git diff --cached --quiet; then
+            echo "No Kustomize changes detected."
+            exit 0
+          fi
 
-            echo "### New published image"
-            echo ""
-            echo "- Image: \`$NEW_IMAGE\`"
-            echo "- Tag: \`$IMAGE_TAG\`"
-            echo "- Digest: \`$NEW_DIGEST\`"
-            echo "- Updated time: \`$NEW_UPDATED_TIME\`"
-            echo ""
+          git commit \
+            -m "chore(deploy): update backend image to ${IMAGE_TAG}"
 
-            echo "### Build information"
-            echo ""
-            echo "- Push creator: \`$GITHUB_ACTOR\`"
-            echo "- Triggering actor: \`$GITHUB_TRIGGERING_ACTOR\`"
-            echo "- Commit SHA: \`$GITHUB_SHA\`"
-            echo "- Branch: \`$GITHUB_REF_NAME\`"
-
-          } >> "$GITHUB_STEP_SUMMARY"
+          git push
