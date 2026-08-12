@@ -19,35 +19,60 @@ env:
   IMAGE_NAME: backend-tasks-api-v3
   VERSION_PREFIX: sura.v
 
+  AZURE_TENANT_ID: 9dbc76ea-fb25-4b07-8f07-5dc315999b76
+  AZURE_SUBSCRIPTION_ID: f0550323-fb0b-44d4-8a39-ecf0f6c2dbc9
+
 jobs:
   build-and-push:
     runs-on: ubuntu-latest
 
     steps:
+
+
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
       - name: Azure Login
-        uses: azure/login@v2
+        uses: azure/login@v3
         with:
-          creds: ${{ secrets.AZURE_CREDENTIALS }}
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          client-secret: ${{ secrets.AZURE_CLIENT_SECRET }}
+          tenant-id: ${{ env.AZURE_TENANT_ID }}
+          subscription-id: ${{ env.AZURE_SUBSCRIPTION_ID }}
+          auth-type: SERVICE_PRINCIPAL
+
+
+      - name: Validate Azure Login
+        shell: bash
+        run: |
+          echo "===== AZURE ACCOUNT ====="
+
+          az account show \
+            --query "{subscription:id,tenantId:tenantId,user:user.name}" \
+            --output table
+
 
       - name: Azure Container Registry Login
+        shell: bash
         run: |
-          echo "===== Azure Container Registry ====="
+          echo "===== AZURE CONTAINER REGISTRY ====="
 
           az acr show \
             --name "$ACR_NAME" \
+            --query "{name:name,loginServer:loginServer}" \
             --output table
 
-          az acr login \
-            --name "$ACR_NAME"
+          echo "===== DOCKER LOGIN ====="
+
+          echo "${{ secrets.AZURE_CLIENT_SECRET }}" | \
+            docker login "$REGISTRY" \
+              --username "${{ secrets.AZURE_CLIENT_ID }}" \
+              --password-stdin
 
 
       - name: Calculate Image Version
-        id: version
         shell: bash
         run: |
           echo "===== CALCULATING IMAGE VERSION ====="
@@ -72,65 +97,121 @@ jobs:
           IMAGE_TAG="${VERSION_PREFIX}${NEXT_VERSION}"
           FULL_IMAGE="${REGISTRY}/${IMAGE_NAME}:${IMAGE_TAG}"
 
-          echo "Last version : ${LAST_VERSION}"
-          echo "Next version : ${NEXT_VERSION}"
-          echo "Image tag    : ${IMAGE_TAG}"
-          echo "Full image   : ${FULL_IMAGE}"
+          echo "======================================"
+          echo "ACR           : $ACR_NAME"
+          echo "Repository    : $IMAGE_NAME"
+          echo "Last version  : $LAST_VERSION"
+          echo "Next version  : $NEXT_VERSION"
+          echo "Image tag     : $IMAGE_TAG"
+          echo "Full image    : $FULL_IMAGE"
+          echo "======================================"
 
           echo "IMAGE_TAG=${IMAGE_TAG}" >> "$GITHUB_ENV"
           echo "FULL_IMAGE=${FULL_IMAGE}" >> "$GITHUB_ENV"
 
 
       - name: Build Docker Image
+        shell: bash
         run: |
-          echo "===== BUILDING IMAGE ====="
+          echo "===== BUILDING DOCKER IMAGE ====="
 
           docker build \
-            -t "$FULL_IMAGE" \
+            --tag "$FULL_IMAGE" \
             .
 
+          echo "Docker image created:"
+          echo "$FULL_IMAGE"
+
+
       - name: Push Docker Image
+        shell: bash
         run: |
-          echo "===== PUSHING IMAGE ====="
+          echo "===== PUSHING DOCKER IMAGE ====="
 
           docker push "$FULL_IMAGE"
 
-      - name: Verify Image in ACR
-        run: |
-          echo "===== VERIFYING IMAGE ====="
+          echo "Image successfully pushed:"
+          echo "$FULL_IMAGE"
 
-          az acr repository show \
+
+      - name: Verify Image in ACR
+        shell: bash
+        run: |
+          echo "===== VERIFYING IMAGE IN ACR ====="
+
+          echo "Repository:"
+          echo "$IMAGE_NAME"
+
+          echo "Expected tag:"
+          echo "$IMAGE_TAG"
+
+          echo "Available tags:"
+          az acr repository show-tags \
             --name "$ACR_NAME" \
             --repository "$IMAGE_NAME" \
             --output table
 
-          echo "Checking tag: $IMAGE_TAG"
+          echo "===== VERIFYING GENERATED TAG ====="
 
-          az acr repository show-tags \
-            --name "$ACR_NAME" \
-            --repository "$IMAGE_NAME" \
-            --output tsv |
-            grep -Fx "$IMAGE_TAG"
+          if az acr repository show-tags \
+              --name "$ACR_NAME" \
+              --repository "$IMAGE_NAME" \
+              --output tsv |
+              grep -Fx "$IMAGE_TAG"; then
 
+            echo "======================================"
+            echo "IMAGE VERIFIED SUCCESSFULLY"
+            echo "IMAGE: $FULL_IMAGE"
+            echo "======================================"
+
+          else
+
+            echo "ERROR: Image tag $IMAGE_TAG was not found in ACR."
+            exit 1
+
+          fi
 
       - name: Setup Kustomize
         if: github.ref == 'refs/heads/main'
         uses: imranismail/setup-kustomize@v2
 
+
       - name: Update Kustomize Image Tag
         if: github.ref == 'refs/heads/main'
         shell: bash
         run: |
-          echo "===== UPDATING KUSTOMIZE ====="
+          echo "===== UPDATING KUSTOMIZATION ====="
 
           cd deploy
 
+          echo "Current kustomization.yaml:"
+          cat kustomization.yaml
+
+          echo "======================================"
+          echo "Updating image:"
+          echo "app-image=${FULL_IMAGE}"
+          echo "======================================"
+
           kustomize edit set image \
-            app-image="${REGISTRY}/${IMAGE_NAME}:${IMAGE_TAG}"
+            "app-image=${FULL_IMAGE}"
 
           echo
           echo "===== UPDATED KUSTOMIZATION ====="
+
           cat kustomization.yaml
+
+      - name: Validate Kustomize
+        if: github.ref == 'refs/heads/main'
+        shell: bash
+        run: |
+          echo "===== VALIDATING KUSTOMIZE ====="
+
+          cd deploy
+
+          kustomize build .
+
+          echo "===== KUSTOMIZE VALIDATION SUCCESS ====="
+
 
       - name: Commit Kustomize Update
         if: github.ref == 'refs/heads/main'
@@ -148,7 +229,12 @@ jobs:
             exit 0
           fi
 
+          echo "Changes to be committed:"
+          git diff --cached -- deploy/kustomization.yaml
+
           git commit \
             -m "chore(deploy): update backend image to ${IMAGE_TAG}"
 
           git push
+
+          echo "===== KUSTOMIZE UPDATE PUSHED ====="
