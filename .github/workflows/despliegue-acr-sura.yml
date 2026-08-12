@@ -26,15 +26,9 @@ jobs:
 
     steps:
 
-      # =========================================================
-      # CHECKOUT
-      # =========================================================
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # =========================================================
-      # AZURE LOGIN
-      # =========================================================
       - name: Azure CLI Login
         shell: bash
         env:
@@ -58,9 +52,6 @@ jobs:
             --query "{subscription:id,tenantId:tenantId,user:user.name}" \
             --output table
 
-      # =========================================================
-      # ACR LOGIN
-      # =========================================================
       - name: Azure Container Registry Login
         shell: bash
         env:
@@ -81,9 +72,7 @@ jobs:
               --username "$AZURE_CLIENT_ID" \
               --password-stdin
 
-      # =========================================================
-      # BUILD
-      # =========================================================
+
       - name: Build Docker Image
         shell: bash
         run: |
@@ -96,9 +85,7 @@ jobs:
             --tag "$FULL_IMAGE" \
             .
 
-      # =========================================================
-      # PUSH
-      # =========================================================
+
       - name: Push Docker Image
         shell: bash
         run: |
@@ -109,9 +96,7 @@ jobs:
 
           docker push "$FULL_IMAGE"
 
-      # =========================================================
-      # VERIFY
-      # =========================================================
+
       - name: Verify Image
         shell: bash
         run: |
